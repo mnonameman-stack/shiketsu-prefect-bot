@@ -1,0 +1,12 @@
+# Never commit the real token/config
+.env
+
+# Runtime data (regenerated automatically, no need to version control)
+warnings.json
+active_trainings.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/

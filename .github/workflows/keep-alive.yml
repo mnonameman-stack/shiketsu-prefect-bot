@@ -1,0 +1,52 @@
+name: Run Shiketsu Prefect Bot
+
+# Free-forever hosting trick: GitHub Actions gives unlimited free minutes to
+# public repos, but caps each individual job at 6 hours. So this workflow
+# runs the bot for ~5h50m, exits cleanly, and a new scheduled run picks it
+# back up a few minutes later - repeating forever. Expect a ~10 minute gap
+# in the bot's availability every 6 hours while it restarts.
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"   # every 6 hours, on the hour
+  workflow_dispatch: {}       # lets you manually start/restart it from the Actions tab
+
+permissions:
+  contents: write   # needed so the "persist bot state" step can commit/push
+
+concurrency:
+  group: shiketsu-prefect-bot
+  cancel-in-progress: false
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 358
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - name: Run bot for ~5h50m, then exit cleanly for the next cycle
+        run: timeout 350m python bot.py || true
+        env:
+          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+          GUILD_ID: ${{ secrets.GUILD_ID }}
+          LOG_CHANNEL_ID: ${{ secrets.LOG_CHANNEL_ID }}
+          TRAINING_CHANNEL_ID: ${{ secrets.TRAINING_CHANNEL_ID }}
+          MOD_ROLE_IDS: ${{ secrets.MOD_ROLE_IDS }}
+          TRAINER_ROLE_IDS: ${{ secrets.TRAINER_ROLE_IDS }}
+
+      - name: Persist bot state back to the repo
+        if: always()
+        run: |
+          git config user.name "shiketsu-prefect-bot"
+          git config user.email "actions@github.com"
+          git add warnings.json active_trainings.json
+          git diff --cached --quiet || git commit -m "Persist bot state [skip ci]"
+          git push
+        continue-on-error: true

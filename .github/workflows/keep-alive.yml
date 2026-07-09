@@ -1,22 +1,34 @@
 name: Run Shiketsu Prefect Bot
 
 # Free-forever hosting trick: GitHub Actions gives unlimited free minutes to
-# public repos, but caps each individual job at 6 hours. So this workflow
-# runs the bot for ~5h50m, exits cleanly, and a new scheduled run picks it
-# back up a few minutes later - repeating forever. Expect a ~10 minute gap
-# in the bot's availability every 6 hours while it restarts.
+# public repos, but caps each individual job at 6 hours. So this workflow runs
+# the bot for ~5h50m, exits cleanly, and a new run picks it back up.
+#
+# Restart mechanism (self-chaining): right after checkout, every run
+# immediately queues the *next* run via the workflow_dispatch API using the
+# built-in GITHUB_TOKEN (GitHub explicitly allows GITHUB_TOKEN to trigger
+# workflow_dispatch/repository_dispatch — see
+# https://github.blog/changelog/2022-09-08-github-actions-use-github_token-with-workflow_dispatch-and-repository_dispatch/).
+# Because of the concurrency group below, that queued run just waits until
+# this run finishes, then starts within seconds — so restarts are no longer
+# tied to a fixed clock time and don't drift into multi-hour gaps. The cron
+# schedule stays on purely as a safety net in case the self-chain ever breaks.
 
 on:
   schedule:
-    - cron: "0 */6 * * *"   # every 6 hours, on the hour
+    - cron: "0 */6 * * *"   # safety net only - the self-chain above is the primary loop
   workflow_dispatch: {}       # lets you manually start/restart it from the Actions tab
 
 permissions:
   contents: write   # needed so the "persist bot state" step can commit/push
+  actions: write     # needed so this run can queue the next one via the API
 
 concurrency:
   group: shiketsu-prefect-bot
   cancel-in-progress: false
+
+env:
+  TIMEOUT_MINUTES: "350"
 
 jobs:
   run-bot:
@@ -25,6 +37,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Queue the next cycle now (self-chaining restart loop)
+        run: |
+          curl -sf -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/keep-alive.yml/dispatches" \
+            -d '{"ref":"${{ github.ref_name }}"}'
+        continue-on-error: true
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -32,21 +53,28 @@ jobs:
       - run: pip install -r requirements.txt
 
       - name: Run bot for ~5h50m, then exit cleanly for the next cycle
-        run: timeout 350m python bot.py || true
+        run: timeout ${TIMEOUT_MINUTES}m python bot.py || true
         env:
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
           GUILD_ID: ${{ secrets.GUILD_ID }}
           LOG_CHANNEL_ID: ${{ secrets.LOG_CHANNEL_ID }}
           TRAINING_CHANNEL_ID: ${{ secrets.TRAINING_CHANNEL_ID }}
+          ASK_FOR_HELP_CHANNEL_ID: ${{ secrets.ASK_FOR_HELP_CHANNEL_ID }}
+          OWNER_ID: ${{ secrets.OWNER_ID }}
           MOD_ROLE_IDS: ${{ secrets.MOD_ROLE_IDS }}
           TRAINER_ROLE_IDS: ${{ secrets.TRAINER_ROLE_IDS }}
 
+      # Actions checks out a fresh copy of the repo every run, so without this,
+      # warning history / active trainings / help requests would reset every
+      # cycle. This commits any changes back using the auto-provided
+      # GITHUB_TOKEN (no extra secret needed) so the next cycle picks up
+      # exactly where this one left off.
       - name: Persist bot state back to the repo
         if: always()
         run: |
           git config user.name "shiketsu-prefect-bot"
           git config user.email "actions@github.com"
-          git add warnings.json active_trainings.json
+          git add warnings.json active_trainings.json help_requests.json
           git diff --cached --quiet || git commit -m "Persist bot state [skip ci]"
           git push
         continue-on-error: true

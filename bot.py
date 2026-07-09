@@ -867,8 +867,16 @@ async def call_help(interaction: discord.Interaction, server_link: str, issue: s
     embed.add_field(name="Helpers", value="No one yet — be the first!", inline=False)
     embed.set_footer(text="Click below if you can help. The requester can cancel once it's sorted.")
 
+    help_role = discord.utils.get(interaction.guild.roles, name="Help pings")
+    ping_content = f"{help_role.mention} {interaction.user.mention}" if help_role else interaction.user.mention
+
     view = HelpView(help_id)
-    msg = await channel.send(content=interaction.user.mention, embed=embed, view=view)
+    msg = await channel.send(
+        content=ping_content,
+        embed=embed,
+        view=view,
+        allowed_mentions=discord.AllowedMentions(users=True, roles=True),
+    )
 
     requests_ = load_help_requests()
     requests_[help_id] = {

@@ -1,8 +1,8 @@
 # Shiketsu Prefect
 
-Custom moderation bot for the **Shiketsu High** Discord server. It's already registered as a
-Discord application (client ID `1524479220028276786`) and already invited to your server with
-the right permissions — the only thing left is to run it somewhere.
+Custom moderation bot for the **Shiketsu High** Discord server (client ID `1524479220028276786`).
+It's live, invited to the server, and hosted for free on GitHub Actions — see "How it's hosted"
+below.
 
 ## What it does
 
@@ -20,70 +20,78 @@ Vice Principal / School Board, who bypass via Administrator):
 - Detects spam (5+ messages in 5 seconds), purges them, and applies a 5-minute timeout
 
 **Training system** (usable by Pro Hero Instructor, Faculty Head, or higher):
-- `/host_training time notes` — posts a training announcement embed to `#training`
-- `/cancel_training` — cancels your most recently announced session
+- `/host_training starts_in server_link notes` — posts an embed to `#「⭐」training` with the
+  time (shown as a live countdown), the private server link, and notes. Members click
+  **Wish to Attend** to RSVP; the bot DMs every attendee 5 minutes before it starts.
+- `/cancel_training` — cancels your most recently announced session and notifies attendees.
 
-## Why I can't just run this for you
+**Call-help system** (usable by anyone):
+- `/call_help server_link issue` — posts an embed to `#「🆘」ask-for-help` with your server link
+  and what's happening. Anyone can click **I Want to Help** to volunteer — you get DMed their
+  name immediately.
+- `/cancel_help` (or the **Cancel Help Request** button on the post) — closes out the request
+  once you're sorted.
 
-I built and tested this bot from a sandboxed environment that only exists for the length of
-our conversation — it has no way to stay online after we're done talking, and it can't reach
-the internet to connect to Discord at all (that's a deliberate restriction). A Discord bot has
-to be a program running continuously somewhere, 24/7, listening for events. That "somewhere"
-has to be a real computer or server that stays on. Here are your options, cheapest/easiest first.
+**Owner reboot control** — about 30 minutes before each ~6-hour hosting cycle ends, the bot DMs
+the server owner with a **Reboot Now** button to restart early instead of waiting.
 
-## Option 1: Run it on your own computer
+## How it's hosted
 
-Simplest if you're okay leaving a terminal window open (or your PC on) while you want the bot active.
+The bot runs for free, forever, on **GitHub Actions** using a self-restarting workflow
+(`.github/workflows/keep-alive.yml`):
 
-1. Install [Python 3.10+](https://www.python.org/downloads/) if you don't have it.
-2. Open a terminal in this folder.
-3. Install dependencies:
-   ```
-   pip install -r requirements.txt
-   ```
-4. The `.env` file already has your bot token and server IDs filled in. Just run:
-   ```
-   python bot.py
-   ```
-5. You should see `Shiketsu Prefect is online and ready.` in the terminal. Closing the terminal
-   stops the bot.
+- GitHub gives *unlimited* free Actions minutes to public repos, but caps a single run at 6
+  hours. So each run executes the bot for ~5h50m, then exits.
+- The moment a run starts, it immediately queues the *next* run via the GitHub API. Because of
+  the workflow's concurrency setting, that queued run just waits until the current one finishes,
+  then starts within seconds — so restarts aren't tied to a fixed clock time and don't drift
+  into multi-hour gaps like a plain cron schedule would.
+- Bot state (`warnings.json`, `active_trainings.json`, `help_requests.json`) is committed back to
+  the repo at the end of every run, so nothing resets between cycles.
+- A cron trigger (`0 */6 * * *`) stays on purely as a safety net in case the self-restart chain
+  ever breaks.
 
-## Option 2: A free/cheap always-on host (recommended for 24/7 uptime)
+**Expect a brief (usually under a minute, worst case ~10 minutes) gap in the bot's availability
+every ~6 hours** while one run hands off to the next. The owner gets a heads-up DM 30 minutes
+before each handoff with the option to trigger it early.
 
-These run your bot continuously without you needing to keep a computer on. All of them require
-*you* to create the account (I can't sign up for third-party services on your behalf) — but I'm
-happy to walk you through the setup step by step once you pick one.
+To manually trigger a run: open the repo on GitHub → **Actions** tab → **Run Shiketsu Prefect
+Bot** → **Run workflow**.
 
-- **[Railway](https://railway.app)** — free trial credit, then ~$5/month. Deploy by connecting
-  a GitHub repo or uploading this folder directly. Easiest of the three.
-- **[Render](https://render.com)** — has a free tier for "Background Workers" (may sleep after
-  inactivity on the free plan, upgrade removes that).
-- **A cheap VPS** (Oracle Cloud has a genuinely free tier, or DigitalOcean/Linode for a few
-  dollars/month) — most control, requires a bit more comfort with the command line.
+## Running it yourself instead (optional)
 
-Whichever you pick, the steps are basically: create the account, upload/connect this folder,
-set the same environment variables that are in `.env`, and tell it to run `python bot.py`.
+If you ever want to run this locally for testing:
+
+1. Install [Python 3.10+](https://www.python.org/downloads/).
+2. Open a terminal in this folder and run `pip install -r requirements.txt`.
+3. Make sure `.env` has your bot token and IDs filled in (see `.env.example`).
+4. Run `python bot.py`. You should see `Shiketsu Prefect is online and ready.`
 
 ## Files in this folder
 
 - `bot.py` — the bot itself
-- `requirements.txt` — Python packages it needs (`pip install -r requirements.txt`)
-- `.env` — your bot token and server/channel/role IDs, already filled in
-- `.env.example` — blank template, useful if you ever rebuild this from scratch
-- `warnings.json` — where warning history is stored (auto-created/updated)
-- `active_trainings.json` — tracks currently-announced training sessions (auto-created/updated)
+- `requirements.txt` — Python packages it needs
+- `.env` — bot token and server/channel/role IDs (never committed — see Security note)
+- `.env.example` — blank template
+- `.github/workflows/keep-alive.yml` — the self-restarting GitHub Actions hosting workflow
+- `warnings.json` — warning history per member (auto-updated, committed by the workflow)
+- `active_trainings.json` — active/past training sessions + RSVPs (auto-updated, committed)
+- `help_requests.json` — active/past help requests + helpers (auto-updated, committed)
 
 ## Security note
 
-`.env` contains your bot's live token. Anyone with that token can control the bot as if they
-were you. Don't post it publicly, and don't commit it to a public GitHub repo (if you do use
-GitHub for hosting, add `.env` to a `.gitignore` file and set the token as an environment
-variable in the host's dashboard instead).
+`.env` (and the equivalent GitHub Actions secrets) contain your bot's live token. Anyone with
+that token can control the bot as if they were you. The token is stored as a GitHub Actions
+**secret**, not in the repo's code — secrets are encrypted and never shown in logs. The repo
+itself is public (required for free Actions minutes) but contains no credentials.
 
 ## Customizing
 
-- To change which roles can moderate, edit `MOD_ROLE_IDS` in `.env` (comma-separated role IDs).
+- To change which roles can moderate, edit `MOD_ROLE_IDS` (comma-separated role IDs) as a repo
+  secret (or in `.env` for local runs).
 - To change which roles can host training, edit `TRAINER_ROLE_IDS`.
-- To point at different channels for logs/training, edit `LOG_CHANNEL_ID` / `TRAINING_CHANNEL_ID`.
+- To point at different channels, edit `LOG_CHANNEL_ID` / `TRAINING_CHANNEL_ID` /
+  `ASK_FOR_HELP_CHANNEL_ID`.
+- To change who gets the pre-restart reboot DM, edit `OWNER_ID`.
 - Automod thresholds (spam count/window, caps ratio) are constants near the top of `bot.py`
   under "Automod" if you want to tune sensitivity.

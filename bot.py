@@ -106,6 +106,22 @@ def save_help_requests(data):
     _save_json(HELP_REQUESTS_FILE, data)
 
 
+def normalize_link(link: str) -> str:
+    """Make sure a user-supplied server link has a proper scheme so Discord
+    will actually treat it as a clickable URL (bare domains like
+    'discord.gg/xyz' are not auto-linked)."""
+    link = link.strip()
+    if not link.lower().startswith(("http://", "https://")):
+        link = "https://" + link
+    return link
+
+
+def link_field(link: str) -> str:
+    """Render a server link as a clickable masked markdown link for use in
+    embed fields."""
+    return f"[Click to join]({normalize_link(link)})"
+
+
 # ---------------------------------------------------------------------------
 # Bot setup
 # ---------------------------------------------------------------------------
@@ -744,6 +760,7 @@ async def host_training(
         await interaction.response.send_message("Training channel isn't configured or couldn't be found.", ephemeral=True)
         return
 
+    server_link = normalize_link(server_link)
     start_dt = datetime.now(timezone.utc) + timedelta(minutes=starts_in)
     start_ts = int(start_dt.timestamp())
     training_id = f"t{int(datetime.now(timezone.utc).timestamp())}"
@@ -755,7 +772,7 @@ async def host_training(
     )
     embed.add_field(name="Host", value=interaction.user.mention, inline=True)
     embed.add_field(name="Starts", value=f"<t:{start_ts}:F> (<t:{start_ts}:R>)", inline=True)
-    embed.add_field(name="Server Link", value=server_link, inline=False)
+    embed.add_field(name="Server Link", value=link_field(server_link), inline=False)
     embed.add_field(name="Notes", value=notes, inline=False)
     embed.add_field(name="Attending", value="No one yet — be the first!", inline=False)
     embed.set_footer(text="Click below to get a DM reminder 5 minutes before it starts.")
@@ -836,6 +853,7 @@ async def call_help(interaction: discord.Interaction, server_link: str, issue: s
         await interaction.response.send_message("The ask-for-help channel isn't configured or couldn't be found.", ephemeral=True)
         return
 
+    server_link = normalize_link(server_link)
     help_id = f"h{int(datetime.now(timezone.utc).timestamp())}"
 
     embed = discord.Embed(
@@ -844,7 +862,7 @@ async def call_help(interaction: discord.Interaction, server_link: str, issue: s
         timestamp=datetime.now(timezone.utc),
     )
     embed.add_field(name="Requested by", value=interaction.user.mention, inline=True)
-    embed.add_field(name="Server Link", value=server_link, inline=True)
+    embed.add_field(name="Server Link", value=link_field(server_link), inline=True)
     embed.add_field(name="What's happening", value=issue, inline=False)
     embed.add_field(name="Helpers", value="No one yet — be the first!", inline=False)
     embed.set_footer(text="Click below if you can help. The requester can cancel once it's sorted.")

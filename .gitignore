@@ -1,9 +1,9 @@
 # Never commit the real token/config
 .env
 
-# Runtime data (regenerated automatically, no need to version control)
-warnings.json
-active_trainings.json
+# NOTE: warnings.json / active_trainings.json / help_requests.json are
+# intentionally NOT ignored - the GitHub Actions workflow commits them back
+# to the repo after each run so bot state survives restarts. See README.
 
 # Python
 __pycache__/

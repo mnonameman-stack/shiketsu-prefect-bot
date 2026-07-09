@@ -7,7 +7,13 @@ Features:
   - Mod-log: every moderation action is posted as an embed to the #logs channel
   - Automod: spam, invite-link, and excessive-caps filtering with warn/delete actions
   - Training system: /host_training and /cancel_training for trainers (Faculty Head /
-    Pro Hero Instructor and above) to announce and cancel training sessions
+    Pro Hero Instructor and above) to announce training sessions with an RSVP button
+    ("Wish to Attend") that DMs attendees 5 minutes before the session starts.
+  - Call-help system: /call_help lets any member post a help request (server link + what's
+    happening) to #ask-for-help with an "I Want to Help" button. Volunteers get matched via
+    DM to the requester, who can /cancel_help or click Cancel Help Request once sorted.
+  - Owner shutdown-warning: DMs the server owner ~30 minutes before the ~6h GitHub Actions
+    cycle ends, with a "Reboot Now" button to restart early instead of waiting.
 
 Run with:  python bot.py
 Requires a .env file (see .env.example) with DISCORD_TOKEN and the IDs below filled in.
@@ -22,7 +28,7 @@ from collections import defaultdict, deque
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -35,6 +41,13 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = int(os.getenv("GUILD_ID", "0"))
 LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0"))
 TRAINING_CHANNEL_ID = int(os.getenv("TRAINING_CHANNEL_ID", "0"))
+ASK_FOR_HELP_CHANNEL_ID = int(os.getenv("ASK_FOR_HELP_CHANNEL_ID", "0"))
+OWNER_ID = int(os.getenv("OWNER_ID", "0")) or None
+
+# How long a single GitHub Actions run is expected to last before it's killed by the
+# workflow's `timeout` command. Used to time the "restarting soon" DM to the owner.
+TIMEOUT_MINUTES = int(os.getenv("TIMEOUT_MINUTES", "350"))
+SHUTDOWN_WARNING_MINUTES_BEFORE = 30
 
 MOD_ROLE_IDS = {
     int(x) for x in os.getenv("MOD_ROLE_IDS", "").split(",") if x.strip()
@@ -45,6 +58,7 @@ TRAINER_ROLE_IDS = {
 
 WARNINGS_FILE = os.path.join(os.path.dirname(__file__), "warnings.json")
 ACTIVE_TRAININGS_FILE = os.path.join(os.path.dirname(__file__), "active_trainings.json")
+HELP_REQUESTS_FILE = os.path.join(os.path.dirname(__file__), "help_requests.json")
 
 GUILD_OBJ = discord.Object(id=GUILD_ID) if GUILD_ID else None
 
@@ -84,6 +98,14 @@ def save_active_trainings(data):
     _save_json(ACTIVE_TRAININGS_FILE, data)
 
 
+def load_help_requests():
+    return _load_json(HELP_REQUESTS_FILE, {})
+
+
+def save_help_requests(data):
+    _save_json(HELP_REQUESTS_FILE, data)
+
+
 # ---------------------------------------------------------------------------
 # Bot setup
 # ---------------------------------------------------------------------------
@@ -93,6 +115,10 @@ intents.members = True
 intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+
+_process_start = datetime.now(timezone.utc)
+_shutdown_warning_sent = False
+_ready_once = False
 
 
 def is_staff(member: discord.Member) -> bool:
@@ -166,13 +192,208 @@ def build_mod_embed(action: str, target: discord.abc.User, moderator: discord.ab
 
 
 # ---------------------------------------------------------------------------
+# Persistent Views - training RSVP, help requests, owner reboot control.
+# These use static custom_ids (encoding the training/help id) so button clicks
+# keep working even after the process restarts, as long as we re-register a
+# matching view via bot.add_view() for every still-active entry in on_ready.
+# ---------------------------------------------------------------------------
+
+
+class TrainingView(discord.ui.View):
+    def __init__(self, training_id: str):
+        super().__init__(timeout=None)
+        self.training_id = training_id
+        btn = discord.ui.Button(
+            label="Wish to Attend", emoji="✅", style=discord.ButtonStyle.success,
+            custom_id=f"training_attend:{training_id}",
+        )
+        btn.callback = self.on_attend
+        self.add_item(btn)
+
+    async def on_attend(self, interaction: discord.Interaction):
+        trainings = load_active_trainings()
+        entry = trainings.get(self.training_id)
+        if entry is None or entry.get("cancelled"):
+            await interaction.response.send_message("This training is no longer active.", ephemeral=True)
+            return
+
+        start_dt = datetime.fromisoformat(entry["start_ts"])
+        if datetime.now(timezone.utc) >= start_dt:
+            await interaction.response.send_message("This training has already started.", ephemeral=True)
+            return
+
+        attendees = entry.setdefault("attendees", [])
+        if interaction.user.id in attendees:
+            await interaction.response.send_message(
+                "You're already signed up — I'll DM you 5 minutes before it starts.", ephemeral=True
+            )
+            return
+
+        attendees.append(interaction.user.id)
+        save_active_trainings(trainings)
+
+        try:
+            msg = interaction.message
+            embed = msg.embeds[0]
+            mentions = ", ".join(f"<@{uid}>" for uid in attendees)
+            for i, field in enumerate(embed.fields):
+                if field.name == "Attending":
+                    embed.set_field_at(i, name="Attending", value=mentions, inline=False)
+                    break
+            await msg.edit(embed=embed)
+        except (discord.HTTPException, IndexError):
+            pass
+
+        await interaction.response.send_message(
+            "✅ You're in! I'll send you a DM reminder 5 minutes before the training starts. "
+            "Make sure your DMs are open.",
+            ephemeral=True,
+        )
+
+
+class HelpView(discord.ui.View):
+    def __init__(self, help_id: str):
+        super().__init__(timeout=None)
+        self.help_id = help_id
+
+        help_btn = discord.ui.Button(
+            label="I Want to Help", emoji="🙋", style=discord.ButtonStyle.success,
+            custom_id=f"help_offer:{help_id}",
+        )
+        help_btn.callback = self.on_help
+        self.add_item(help_btn)
+
+        cancel_btn = discord.ui.Button(
+            label="Cancel Help Request", emoji="🚫", style=discord.ButtonStyle.secondary,
+            custom_id=f"help_cancel:{help_id}",
+        )
+        cancel_btn.callback = self.on_cancel
+        self.add_item(cancel_btn)
+
+    async def on_help(self, interaction: discord.Interaction):
+        requests_ = load_help_requests()
+        entry = requests_.get(self.help_id)
+        if entry is None or entry.get("cancelled"):
+            await interaction.response.send_message("This help request is no longer active.", ephemeral=True)
+            return
+        if interaction.user.id == entry["requester_id"]:
+            await interaction.response.send_message("You can't volunteer to help your own request.", ephemeral=True)
+            return
+
+        helpers = entry.setdefault("helpers", [])
+        if interaction.user.id in helpers:
+            await interaction.response.send_message("You've already offered to help with this one.", ephemeral=True)
+            return
+
+        helpers.append(interaction.user.id)
+        save_help_requests(requests_)
+
+        requester = interaction.guild.get_member(entry["requester_id"]) if interaction.guild else None
+        if requester:
+            try:
+                await requester.send(
+                    f"🙋 **{interaction.user}** said they'll help you out with your request in "
+                    f"**{interaction.guild.name}**! Server link you posted: {entry['server_link']}"
+                )
+            except discord.HTTPException:
+                pass
+
+        try:
+            msg = interaction.message
+            embed = msg.embeds[0]
+            helper_mentions = ", ".join(f"<@{uid}>" for uid in helpers)
+            for i, field in enumerate(embed.fields):
+                if field.name == "Helpers":
+                    embed.set_field_at(i, name="Helpers", value=helper_mentions, inline=False)
+                    break
+            await msg.edit(embed=embed)
+        except (discord.HTTPException, IndexError):
+            pass
+
+        await interaction.response.send_message("✅ Thanks for helping! The requester has been notified.", ephemeral=True)
+
+    async def on_cancel(self, interaction: discord.Interaction):
+        requests_ = load_help_requests()
+        entry = requests_.get(self.help_id)
+        if entry is None or entry.get("cancelled"):
+            await interaction.response.send_message("This help request is already closed.", ephemeral=True)
+            return
+
+        is_requester = interaction.user.id == entry["requester_id"]
+        is_mod = isinstance(interaction.user, discord.Member) and is_staff(interaction.user)
+        if not (is_requester or is_mod):
+            await interaction.response.send_message(
+                "Only the person who requested help (or staff) can cancel this.", ephemeral=True
+            )
+            return
+
+        entry["cancelled"] = True
+        save_help_requests(requests_)
+
+        try:
+            msg = interaction.message
+            embed = msg.embeds[0]
+            embed.title = "✅ Help Request Resolved"
+            embed.color = discord.Color.dark_grey()
+            for item in self.children:
+                item.disabled = True
+            await msg.edit(embed=embed, view=self)
+        except discord.HTTPException:
+            pass
+
+        await interaction.response.send_message("Marked as resolved. Thanks for letting us know!", ephemeral=True)
+
+
+class RebootView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Reboot Now", emoji="🔄", style=discord.ButtonStyle.danger, custom_id="owner_reboot_now")
+    async def reboot(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if OWNER_ID and interaction.user.id != OWNER_ID:
+            await interaction.response.send_message("Only the server owner can trigger this.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            "🔄 Rebooting now. A fresh cycle was already queued when this run started, so I should "
+            "be back online within a minute or two.",
+            ephemeral=True,
+        )
+        await bot.close()
+
+
+# ---------------------------------------------------------------------------
 # Events
 # ---------------------------------------------------------------------------
 
 
 @bot.event
 async def on_ready():
+    global _ready_once
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
+
+    if not _ready_once:
+        _ready_once = True
+
+        # Re-register persistent views for every still-active training / help request
+        # so their buttons keep working across restarts.
+        active = load_active_trainings()
+        for tid, entry in active.items():
+            if not entry.get("cancelled"):
+                bot.add_view(TrainingView(tid))
+
+        help_requests = load_help_requests()
+        for hid, entry in help_requests.items():
+            if not entry.get("cancelled"):
+                bot.add_view(HelpView(hid))
+
+        if OWNER_ID:
+            bot.add_view(RebootView())
+
+        if not training_reminder_loop.is_running():
+            training_reminder_loop.start()
+        if not shutdown_warning_loop.is_running():
+            shutdown_warning_loop.start()
+
     if GUILD_OBJ:
         try:
             synced = await bot.tree.sync(guild=GUILD_OBJ)
@@ -180,6 +401,94 @@ async def on_ready():
         except discord.HTTPException as e:
             print(f"Failed to sync commands: {e}")
     print("Shiketsu Prefect is online and ready.")
+
+
+# ---------------------------------------------------------------------------
+# Background loops
+# ---------------------------------------------------------------------------
+
+
+@tasks.loop(seconds=30)
+async def training_reminder_loop():
+    """Sends a DM to attendees 5 minutes before a training starts, and cleans up
+    old entries. Driven entirely off persisted wall-clock data so it survives
+    process restarts cleanly."""
+    trainings = load_active_trainings()
+    if not trainings:
+        return
+
+    now = datetime.now(timezone.utc)
+    changed = False
+    guild = bot.get_guild(GUILD_ID) if GUILD_ID else None
+
+    for entry in trainings.values():
+        if entry.get("cancelled") or entry.get("reminded"):
+            continue
+        try:
+            start_dt = datetime.fromisoformat(entry["start_ts"])
+        except (KeyError, ValueError):
+            continue
+
+        if now >= start_dt - timedelta(minutes=5):
+            for uid in entry.get("attendees", []):
+                member = guild.get_member(uid) if guild else None
+                try:
+                    target = member or await bot.fetch_user(uid)
+                    start_ts = int(start_dt.timestamp())
+                    await target.send(
+                        f"⏰ Reminder: the training you signed up for starts <t:{start_ts}:R>!\n"
+                        f"Server link: {entry.get('server_link', 'N/A')}\n"
+                        f"Notes: {entry.get('notes', '-')}"
+                    )
+                except discord.HTTPException:
+                    pass
+            entry["reminded"] = True
+            changed = True
+
+    if changed:
+        save_active_trainings(trainings)
+
+
+@training_reminder_loop.before_loop
+async def before_training_reminder_loop():
+    await bot.wait_until_ready()
+
+
+@tasks.loop(minutes=1)
+async def shutdown_warning_loop():
+    """DMs the owner ~30 minutes before this run is expected to hit its GitHub
+    Actions timeout, with a button to reboot early instead of waiting it out."""
+    global _shutdown_warning_sent
+    if _shutdown_warning_sent or not OWNER_ID:
+        return
+
+    elapsed_minutes = (datetime.now(timezone.utc) - _process_start).total_seconds() / 60
+    if elapsed_minutes < (TIMEOUT_MINUTES - SHUTDOWN_WARNING_MINUTES_BEFORE):
+        return
+
+    try:
+        owner = bot.get_user(OWNER_ID) or await bot.fetch_user(OWNER_ID)
+        embed = discord.Embed(
+            title="🔁 Restarting soon",
+            description=(
+                f"I'll automatically restart in about {SHUTDOWN_WARNING_MINUTES_BEFORE} minutes as part "
+                "of my normal ~6-hour cycle. A fresh run is already queued and will pick up right after "
+                "this one ends (usually under a minute of downtime).\n\n"
+                "You don't need to do anything — but if you'd rather restart right now instead of waiting, "
+                "hit the button below."
+            ),
+            color=discord.Color.orange(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        await owner.send(embed=embed, view=RebootView())
+        _shutdown_warning_sent = True
+    except discord.HTTPException:
+        pass
+
+
+@shutdown_warning_loop.before_loop
+async def before_shutdown_warning_loop():
+    await bot.wait_until_ready()
 
 
 # ---------------------------------------------------------------------------
@@ -417,14 +726,27 @@ async def purge(interaction: discord.Interaction, amount: app_commands.Range[int
 # ---------------------------------------------------------------------------
 
 
-@bot.tree.command(name="host_training", description="Announce a training session.", guild=GUILD_OBJ)
-@app_commands.describe(time="When the training is happening (e.g. 'Today 8PM EST')", notes="Any extra details for attendees")
+@bot.tree.command(name="host_training", description="Announce a training session with RSVP + reminder.", guild=GUILD_OBJ)
+@app_commands.describe(
+    starts_in="Minutes from now until the training starts (e.g. 30)",
+    server_link="Private server link/code for attendees to join",
+    notes="Any extra details for attendees",
+)
 @trainer_check()
-async def host_training(interaction: discord.Interaction, time: str, notes: str = "No additional notes."):
+async def host_training(
+    interaction: discord.Interaction,
+    starts_in: app_commands.Range[int, 1, 10080],
+    server_link: str,
+    notes: str = "No additional notes.",
+):
     channel = interaction.guild.get_channel(TRAINING_CHANNEL_ID)
     if channel is None:
         await interaction.response.send_message("Training channel isn't configured or couldn't be found.", ephemeral=True)
         return
+
+    start_dt = datetime.now(timezone.utc) + timedelta(minutes=starts_in)
+    start_ts = int(start_dt.timestamp())
+    training_id = f"t{int(datetime.now(timezone.utc).timestamp())}"
 
     embed = discord.Embed(
         title="📢 Training Session Announced",
@@ -432,29 +754,49 @@ async def host_training(interaction: discord.Interaction, time: str, notes: str 
         timestamp=datetime.now(timezone.utc),
     )
     embed.add_field(name="Host", value=interaction.user.mention, inline=True)
-    embed.add_field(name="Time", value=time, inline=True)
+    embed.add_field(name="Starts", value=f"<t:{start_ts}:F> (<t:{start_ts}:R>)", inline=True)
+    embed.add_field(name="Server Link", value=server_link, inline=False)
     embed.add_field(name="Notes", value=notes, inline=False)
-    embed.set_footer(text="Use /cancel_training to cancel this session.")
+    embed.add_field(name="Attending", value="No one yet — be the first!", inline=False)
+    embed.set_footer(text="Click below to get a DM reminder 5 minutes before it starts.")
 
-    msg = await channel.send(embed=embed)
+    view = TrainingView(training_id)
+    msg = await channel.send(embed=embed, view=view)
 
     active = load_active_trainings()
-    active[str(interaction.user.id)] = {"channel_id": channel.id, "message_id": msg.id}
+    active[training_id] = {
+        "host_id": interaction.user.id,
+        "channel_id": channel.id,
+        "message_id": msg.id,
+        "server_link": server_link,
+        "notes": notes,
+        "start_ts": start_dt.isoformat(),
+        "attendees": [],
+        "reminded": False,
+        "cancelled": False,
+    }
     save_active_trainings(active)
 
-    await interaction.response.send_message(f"✅ Training announced in {channel.mention}.", ephemeral=True)
+    await interaction.response.send_message(
+        f"✅ Training announced in {channel.mention}, starting <t:{start_ts}:R>.", ephemeral=True
+    )
 
 
 @bot.tree.command(name="cancel_training", description="Cancel your most recently announced training session.", guild=GUILD_OBJ)
 @trainer_check()
 async def cancel_training(interaction: discord.Interaction):
     active = load_active_trainings()
-    entry = active.pop(str(interaction.user.id), None)
-    save_active_trainings(active)
-
-    if entry is None:
+    mine = [
+        (tid, e) for tid, e in active.items()
+        if e.get("host_id") == interaction.user.id and not e.get("cancelled")
+    ]
+    if not mine:
         await interaction.response.send_message("You don't have an active training session to cancel.", ephemeral=True)
         return
+
+    tid, entry = max(mine, key=lambda kv: kv[1]["start_ts"])
+    entry["cancelled"] = True
+    save_active_trainings(active)
 
     channel = interaction.guild.get_channel(entry["channel_id"])
     if channel is not None:
@@ -463,11 +805,95 @@ async def cancel_training(interaction: discord.Interaction):
             embed = msg.embeds[0] if msg.embeds else discord.Embed(title="Training Session")
             embed.title = "❌ Training Session Cancelled"
             embed.color = discord.Color.dark_grey()
-            await msg.edit(embed=embed)
+            await msg.edit(embed=embed, view=None)
         except discord.HTTPException:
             pass
 
-    await interaction.response.send_message("✅ Training session cancelled.", ephemeral=True)
+    for uid in entry.get("attendees", []):
+        member = interaction.guild.get_member(uid)
+        if member:
+            try:
+                await member.send(f"❌ The training you signed up for in **{interaction.guild.name}** was cancelled by the host.")
+            except discord.HTTPException:
+                pass
+
+    await interaction.response.send_message("✅ Training session cancelled and attendees notified.", ephemeral=True)
+
+
+# ---------------------------------------------------------------------------
+# Call-help system
+# ---------------------------------------------------------------------------
+
+
+@bot.tree.command(name="call_help", description="Post a help request - your server link and what's happening.", guild=GUILD_OBJ)
+@app_commands.describe(
+    server_link="Link/code to join your game server",
+    issue="What's happening - who's teaming you, being toxic, etc.",
+)
+async def call_help(interaction: discord.Interaction, server_link: str, issue: str):
+    channel = interaction.guild.get_channel(ASK_FOR_HELP_CHANNEL_ID)
+    if channel is None:
+        await interaction.response.send_message("The ask-for-help channel isn't configured or couldn't be found.", ephemeral=True)
+        return
+
+    help_id = f"h{int(datetime.now(timezone.utc).timestamp())}"
+
+    embed = discord.Embed(
+        title="🆘 Help Requested",
+        color=discord.Color.red(),
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.add_field(name="Requested by", value=interaction.user.mention, inline=True)
+    embed.add_field(name="Server Link", value=server_link, inline=True)
+    embed.add_field(name="What's happening", value=issue, inline=False)
+    embed.add_field(name="Helpers", value="No one yet — be the first!", inline=False)
+    embed.set_footer(text="Click below if you can help. The requester can cancel once it's sorted.")
+
+    view = HelpView(help_id)
+    msg = await channel.send(content=interaction.user.mention, embed=embed, view=view)
+
+    requests_ = load_help_requests()
+    requests_[help_id] = {
+        "requester_id": interaction.user.id,
+        "channel_id": channel.id,
+        "message_id": msg.id,
+        "server_link": server_link,
+        "issue": issue,
+        "helpers": [],
+        "cancelled": False,
+    }
+    save_help_requests(requests_)
+
+    await interaction.response.send_message(f"✅ Help request posted in {channel.mention}.", ephemeral=True)
+
+
+@bot.tree.command(name="cancel_help", description="Cancel your most recent active help request.", guild=GUILD_OBJ)
+async def cancel_help(interaction: discord.Interaction):
+    requests_ = load_help_requests()
+    mine = [
+        (hid, e) for hid, e in requests_.items()
+        if e.get("requester_id") == interaction.user.id and not e.get("cancelled")
+    ]
+    if not mine:
+        await interaction.response.send_message("You don't have an active help request to cancel.", ephemeral=True)
+        return
+
+    hid, entry = max(mine, key=lambda kv: kv[0])
+    entry["cancelled"] = True
+    save_help_requests(requests_)
+
+    channel = interaction.guild.get_channel(entry["channel_id"])
+    if channel is not None:
+        try:
+            msg = await channel.fetch_message(entry["message_id"])
+            embed = msg.embeds[0] if msg.embeds else discord.Embed(title="Help Request")
+            embed.title = "✅ Help Request Resolved"
+            embed.color = discord.Color.dark_grey()
+            await msg.edit(embed=embed, view=None)
+        except discord.HTTPException:
+            pass
+
+    await interaction.response.send_message("✅ Help request cancelled. Glad it's sorted!", ephemeral=True)
 
 
 # ---------------------------------------------------------------------------

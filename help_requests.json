@@ -1,1 +1,40 @@
-{}
+{
+  "h1783599835": {
+    "requester_id": 1040989419081048124,
+    "channel_id": 1456896903026311253,
+    "message_id": 1524752964672290950,
+    "server_link": "https://discord.gg/verify-ping-test",
+    "issue": "Verifying Help pings role fires correctly",
+    "helpers": [],
+    "cancelled": true
+  },
+  "h1783600187": {
+    "requester_id": 1040989419081048124,
+    "channel_id": 1456896903026311253,
+    "message_id": 1524754442635841749,
+    "server_link": "https://Help",
+    "issue": "team",
+    "helpers": [],
+    "cancelled": true
+  },
+  "h1783604484": {
+    "requester_id": 1336730459333333072,
+    "channel_id": 1456896903026311253,
+    "message_id": 1524772467212812320,
+    "server_link": "https://1369252646581436497",
+    "issue": "<@1040989419081048124>",
+    "helpers": [
+      1040989419081048124
+    ],
+    "cancelled": true
+  },
+  "h1783604684": {
+    "requester_id": 1336730459333333072,
+    "channel_id": 1456896903026311253,
+    "message_id": 1524773304836292739,
+    "server_link": "https://1369252646581436497",
+    "issue": "training",
+    "helpers": [],
+    "cancelled": false
+  }
+}

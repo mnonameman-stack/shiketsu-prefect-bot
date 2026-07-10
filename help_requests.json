@@ -34,7 +34,20 @@
     "message_id": 1524773304836292739,
     "server_link": "https://1369252646581436497",
     "issue": "training",
-    "helpers": [],
+    "helpers": [
+      830341655298703410
+    ],
     "cancelled": false
+  },
+  "h1783690540": {
+    "requester_id": 1511489524666994689,
+    "channel_id": 1456896903026311253,
+    "message_id": 1525133409326862367,
+    "server_link": "https://ez",
+    "issue": "teamersson",
+    "helpers": [
+      1040989419081048124
+    ],
+    "cancelled": true
   }
 }

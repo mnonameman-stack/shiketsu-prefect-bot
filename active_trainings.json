@@ -11,6 +11,30 @@
       1336730459333333072
     ],
     "reminded": true,
-    "cancelled": false
+    "cancelled": true
+  },
+  "t1783690408": {
+    "host_id": 1511489524666994689,
+    "channel_id": 1456896908067999807,
+    "message_id": 1525132855775334442,
+    "server_link": "https://son",
+    "notes": "No additional notes.",
+    "start_ts": "2026-07-10T13:38:28.252399+00:00",
+    "attendees": [],
+    "reminded": false,
+    "cancelled": true
+  },
+  "t1783690480": {
+    "host_id": 1511489524666994689,
+    "channel_id": 1456896908067999807,
+    "message_id": 1525133159115784263,
+    "server_link": "https://ezez",
+    "notes": "No additional notes.",
+    "start_ts": "2026-07-10T13:39:40.599223+00:00",
+    "attendees": [
+      1040989419081048124
+    ],
+    "reminded": true,
+    "cancelled": true
   }
 }

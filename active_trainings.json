@@ -36,5 +36,18 @@
     ],
     "reminded": true,
     "cancelled": true
+  },
+  "t1784140720": {
+    "host_id": 1040989419081048124,
+    "channel_id": 1456896908067999807,
+    "message_id": 1527021603534278678,
+    "server_link": "https://www.roblox.com/share?code=66ea8cb5310b7d4a869867fd4575dc69&type=Server",
+    "notes": "come nubs",
+    "start_ts": "2026-07-15T18:48:40.842516+00:00",
+    "attendees": [
+      1264255444520665226
+    ],
+    "reminded": true,
+    "cancelled": true
   }
 }
